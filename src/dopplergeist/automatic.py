@@ -136,10 +136,13 @@ def analyze(request, output_dir, config=None, progress=lambda *args, **kwargs: N
         return finish("failed", "invalid_configuration", "Spectral comparison accepts only work limits and spectral grid settings.")
     if not resume:
         progress("intake", 0.05, message="Decoding audio.")
+        def report_intake_progress(**details):
+            fraction, message = _decode_progress(0.05, 0.14, "Decoding audio", **details)
+            progress("intake", fraction, message=message)
+
         try:
             recording = intake_recording(request["audio_path"], output / "intake", time_window=request.get("time_window"),
-                                         progress_callback=_throttled(lambda **details: progress(
-                                             "intake", *_decode_progress(0.05, 0.14, "Decoding audio", **details))))
+                                         progress_callback=_throttled(report_intake_progress))
         except AudioIntakeError as exc:
             return finish("failed", exc.code, str(exc))
         state["recording"] = recording.metadata
