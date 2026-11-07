@@ -97,6 +97,26 @@ def test_decode_progress_and_throttle():
     assert [call.get("phase") for call in calls] == ["decoding_high_rate", "tracking_ridges"]
 
 
+def test_intake_progress_matches_the_job_progress_signature(tmp_path, monkeypatch):
+    from dopplergeist import intake
+
+    def report_then_stop(path, output, *, progress_callback=None, **_):
+        progress_callback(decoded_s=0.0, duration_s=180.0)
+        raise intake.AudioIntakeError("stop_after_progress", "stopped after the first report")
+
+    monkeypatch.setattr(intake, "intake_recording", report_then_stop)
+    reports = []
+
+    def job_progress(stage, fraction, **fields):  # same shape as jobs.execute's progress
+        reports.append((stage, fraction, fields.get("message")))
+
+    placeholder = tmp_path / "input.m4a"
+    placeholder.touch()  # only hashed; intake is replaced above, so nothing is decoded
+    final = automatic.analyze({"schema_version": 1, "audio_path": str(placeholder)}, tmp_path / "job", {}, job_progress)
+    assert final["reason_code"] == "stop_after_progress"
+    assert reports[-1] == ("intake", 0.05, "Decoding audio: 0:00 of 3:00 decoded.")
+
+
 REAL_RECORDING = os.environ.get("DOPPLERGEIST_REAL_RECORDING")
 
 
