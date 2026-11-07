@@ -98,6 +98,7 @@ def analyze(request, output_dir, config=None, progress=lambda *args, **kwargs: N
         artifacts = {"provenance": "provenance.json", "request": "request.json"}
         for name, path in (("intake", "intake/intake.json"), ("recording", "intake/recording.json"),
                            ("discovery", "discovery/discovery.json"), ("discovery_plot", "discovery/discovery.png"),
+                           ("unmatched_proposals", "unmatched-proposals.json"),
                            ("search_report", "search/search-report.json"), ("refinement", "refined-candidates.json"),
                            ("spectral_comparison", "spectral-comparison.json"),
                            ("data_provenance", "data-provenance.json"), ("decision", "decision.json")):
@@ -233,6 +234,8 @@ def analyze(request, output_dir, config=None, progress=lambda *args, **kwargs: N
         state["coverage"]["limitations"].append(str(exc))
         return finish("failed", "data_unavailable", str(exc))
     state["coverage"] = _coverage(request, search, config)
+    if (output / "unmatched-proposals.json").is_file():
+        state["coverage"]["limitations"].append(_unmatched_summary(json.loads((output / "unmatched-proposals.json").read_text())))
     provenance["search_run_hash"] = search.get("run_hash")
     progress("refinement", 0.85, message="Preparing finalist refinements.", **state)
 
@@ -264,6 +267,14 @@ class MissingData(ValueError):
 
 class UnreconciledDiscovery(ValueError):
     pass
+
+
+def _unmatched_summary(unmatched):
+    ridges = sum(len(item["event_ids"]) for item in unmatched)
+    groups = len({item["group_id"] for item in unmatched})
+    return (f"{ridges} detected ridge(s) in {groups} discovery group(s) could not be reconciled with "
+            "their group's lowest band or had too few samples; they were left unmatched. "
+            "See unmatched-proposals.json.")
 
 
 # Display-only progress bands. Fractions never affect scoring or rankings.
@@ -374,18 +385,22 @@ def _latest_emission(hi, duration, events, filters):
 def _search(request, recording, events, output, config, search_progress, acquisition_progress=None):
     from .data_access import FlightIndex, acquire_inputs
     from .geography import profile_for_search, receiver_mask_for_search
-    from .matching import prepare_events, UnreconciledHarmonicGroup
+    from .matching import prepare_events
     from .terrain import Terrain
     from .tiled_search import SearchBudget, search_national
     c = float(config.get("sound_speed_mps", 343.0))
     max_distance = float(config.get("max_distance_m", 20000.0))
-    try:
-        prepared, measurements = prepare_events(events, c=c, max_distance_m=max_distance)
-    except UnreconciledHarmonicGroup as exc:
+    # Ridges that discovery grouped but matching cannot reconcile stay unmatched
+    # and are reported; they no longer stop the search for the remaining events.
+    unmatched = []
+    prepared, measurements = prepare_events(events, c=c, max_distance_m=max_distance, unmatched=unmatched)
+    if unmatched:
+        write_json(output / "unmatched-proposals.json", unmatched)
+    if not prepared:
         raise UnreconciledDiscovery(
-            f"Acoustic proposals could not be reconciled for matching: {exc}. "
-            "The saved discovery diagnostics retain all detected ridges; no location search was performed."
-        ) from exc
+            "No acoustic proposal could be reconciled for matching. "
+            + _unmatched_summary(unmatched)
+            + " The saved discovery diagnostics retain all detected ridges; no location search was performed.")
     window = recording.metadata["time_window"]
     lo, hi = (utc_timestamp(window[name]).timestamp() for name in ("start_utc", "end_utc"))
     filters = {"association": "subsets", **config.get("filters", {})}

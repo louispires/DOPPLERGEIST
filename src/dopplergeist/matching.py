@@ -457,12 +457,15 @@ def association_score(result, events):
                 score_kind="matched_group_support_minus_normalized_residual")
 
 
-def prepare_events(detected_events, c=343.0, max_distance_m=20000.0):
+def prepare_events(detected_events, c=343.0, max_distance_m=20000.0, *, unmatched=None):
     """Adapt contract ridge points to existing search inputs without truth hints.
 
     Keep every ridge in a canonical group as evidence for one proposal. Measured
     episode scales (legacy rational ratios) normalize to its lowest observed band; no fundamental
-    needs to be present. Groups with inconsistent ratios must be fixed by discovery.
+    needs to be present. By default a group with inconsistent ratios raises.
+    When ``unmatched`` is a list, a ridge that cannot be reconciled with its
+    group's lowest band, and a group left with too few samples, stay unmatched
+    instead: each is appended to ``unmatched`` with its reason and never scored.
     Separate paths that reuse measured peaks remain separate hypotheses, with
     an explicit conflict preventing their joint independent-support score.
     Timing uncertainty spans the observed window, because a curved track need
@@ -482,7 +485,7 @@ def prepare_events(detected_events, c=343.0, max_distance_m=20000.0):
         reference = min(members, key=lambda e: np.median([p["frequency_hz"] for p in e["ridge"]]))
         reference_time = np.array([p["time_s"] for p in reference["ridge"]])
         reference_frequency = np.array([p["frequency_hz"] for p in reference["ridge"]])
-        times, frequencies, weights = [], [], []
+        times, frequencies, weights, used = [], [], [], []
         for member in members:
             t = np.array([p["time_s"] for p in member["ridge"]], dtype=float)
             f = np.array([p["frequency_hz"] for p in member["ridge"]], dtype=float)
@@ -500,12 +503,21 @@ def prepare_events(detected_events, c=343.0, max_distance_m=20000.0):
             elif member is not reference:
                 base = np.column_stack((reference_time, reference_frequency))
                 shared = _overlap(base, np.column_stack((t, f)))
+                reason = None
                 if shared is None or len(shared[0]) * 0.5 < 0.6 * min(np.ptp(reference_time), np.ptp(t)):
-                    raise UnreconciledHarmonicGroup(f"Harmonic group {group_id}: ridges lack sufficient shared observations")
-                ratio = shared[2] / shared[1]
-                harmonic = min([1.0, *_HARMONIC_RATIOS], key=lambda value: abs(value - np.median(ratio)))
-                if np.quantile(np.abs(ratio - harmonic) / harmonic, 0.9) >= 0.008:
-                    raise UnreconciledHarmonicGroup(f"Harmonic group {group_id}: inconsistent supported frequency ratio")
+                    reason = "ridges lack sufficient shared observations"
+                else:
+                    ratio = shared[2] / shared[1]
+                    harmonic = min([1.0, *_HARMONIC_RATIOS], key=lambda value: abs(value - np.median(ratio)))
+                    if np.quantile(np.abs(ratio - harmonic) / harmonic, 0.9) >= 0.008:
+                        reason = "inconsistent supported frequency ratio"
+                if reason is not None:
+                    if unmatched is None:
+                        raise UnreconciledHarmonicGroup(f"Harmonic group {group_id}: {reason}")
+                    unmatched.append({"group_id": group_id, "event_ids": [member["event_id"]],
+                                      "reference_event_id": reference["event_id"], "reason": reason})
+                    continue
+            used.append(member)
             times.extend(t)
             frequencies.extend(f / harmonic)
             # Equal aggregate weight per ridge prevents duplicated harmonics
@@ -513,8 +525,14 @@ def prepare_events(detected_events, c=343.0, max_distance_m=20000.0):
             weights.extend(w / max(np.sum(w), 1e-12))
         order = np.argsort(times, kind="stable")
         t, f, w = (np.asarray(a)[order] for a in (times, frequencies, weights))
+        if unmatched is not None and len(t) < 10:
+            unmatched.append({"group_id": group_id, "event_ids": [e["event_id"] for e in used],
+                              "reference_event_id": reference["event_id"],
+                              "reason": "fewer than ten ridge samples"})
+            continue
         if len(t) < 10 or not np.all(np.isfinite(np.column_stack((t, f, w)))) or np.any(w < 0):
             raise ValueError("Matching requires at least ten finite, nonnegative-weight ridge samples")
+        members = used
         start, end = min(e["start_s"] for e in members), max(e["end_s"] for e in members)
         center = float(reference.get("cpa_receive_s", (start + end) / 2))
         quality = dict(reference.get("quality", {}))

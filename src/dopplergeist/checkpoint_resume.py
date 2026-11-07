@@ -150,7 +150,8 @@ def upgrade_legacy_job(directory):
     if any(_digest(directory / name) != digest for name, digest in audio["files"].items()):
         raise ValueError("Saved audio checkpoint changed")
     discovery = json.loads((directory / "discovery/discovery.json").read_text())
-    events, _ = matching.prepare_events(discovery["events"])
+    # Same lenient adaptation as automatic._search, so saved searches still compare equal.
+    events, _ = matching.prepare_events(discovery["events"], unmatched=[])
     if events != old["events"]:
         raise ValueError("Prepared events no longer match the saved search")
     current = deepcopy(old)
